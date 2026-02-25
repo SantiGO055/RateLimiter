@@ -1,0 +1,30 @@
+# Build output
+bin/
+obj/
+
+# .NET user-specific files
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# Rider / JetBrains
+.idea/
+
+# Visual Studio
+.vs/
+*.vsidx
+
+# macOS
+.DS_Store
+
+# Test results
+TestResults/
+coverage/
+*.trx
+*.coveragexml
+
+# NuGet
+*.nupkg
+*.snupkg
+packages/
