@@ -1,6 +1,8 @@
+using System.Diagnostics;
 using System.Text.Json;
 using Microsoft.Extensions.Options;
 using RateLimiter.Api.Configuration;
+using RateLimiter.Api.Metrics;
 using RateLimiter.Domain;
 
 namespace RateLimiter.Api.Middleware;
@@ -9,7 +11,8 @@ public class RateLimitMiddleware(
     RequestDelegate next,
     IRateLimitAlgorithm algorithm,
     IOptions<RateLimitOptions> options,
-    ILogger<RateLimitMiddleware> logger)
+    ILogger<RateLimitMiddleware> logger,
+    RateLimitMetrics metrics)
 {
     public async Task InvokeAsync(HttpContext context)
     {
@@ -33,6 +36,7 @@ public class RateLimitMiddleware(
         catch (Exception ex)
         {
             logger.LogWarning(ex, "Rate limit evaluation failed for key {ClientKey}", clientKey);
+            metrics.StoreErrors.Add(1, new TagList { { "endpoint", path } });
 
             if (options.Value.FailOpen)
             {
@@ -48,15 +52,24 @@ public class RateLimitMiddleware(
 
         if (result.IsAllowed)
         {
+            logger.LogDebug("Request allowed: key={ClientKey} remaining={Remaining}", clientKey, result.Remaining);
+            metrics.RequestsAllowed.Add(1, new TagList { { "endpoint", path } });
             await next(context);
             return;
         }
 
+        logger.LogInformation(
+            "Request blocked: key={ClientKey} retryAfter={RetryAfterSeconds}s",
+            clientKey, result.RetryAfterSeconds);
+        metrics.RequestsBlocked.Add(1, new TagList { { "endpoint", path } });
         await WriteRejectedResponse(context.Response, result);
     }
 
     private static string ExtractClientIp(HttpContext context)
     {
+        // X-Forwarded-For is read first to support proxies and load balancers in production,
+        // and to allow simulating distinct client IPs in integration tests where
+        // WebApplicationFactory always reports loopback as the remote address.
         var forwarded = context.Request.Headers["X-Forwarded-For"].FirstOrDefault();
         if (!string.IsNullOrEmpty(forwarded))
             return forwarded.Split(',')[0].Trim();

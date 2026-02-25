@@ -74,20 +74,39 @@ Distintos clientes (distintas IPs) son procesados en paralelo y nunca se bloquea
 
 ---
 
+## Modos de almacenamiento
+
+El sistema soporta dos modos de almacenamiento configurables:
+
+### InMemory (por defecto)
+
+Los baldes de cada cliente se guardan en la memoria del proceso. Es el modo recomendado para una sola instancia de la API o para desarrollo local. Los datos se pierden al reiniciar el servidor.
+
+### Redis (distribuido)
+
+Los baldes se guardan en Redis. Todas las instancias de la API comparten el mismo estado, lo que garantiza que el límite se respete globalmente aunque el tráfico se distribuya entre múltiples servidores.
+
+La operación de evaluar si un request pasa o no se ejecuta como un script atómico dentro de Redis, lo que elimina cualquier posibilidad de condición de carrera entre instancias.
+
+Para activar Redis, cambiar `"Store": "Redis"` en `appsettings.json` y tener Redis corriendo (ver README).
+
+---
+
 ## Estado actual del sistema
 
 | Aspecto | Estado |
 |---|---|
 | Tests unitarios del algoritmo | 11/11 pasando |
 | Tests de concurrencia | 2/2 pasando |
-| Tests de integración end-to-end | 10/10 pasando |
-| Total de tests | 24/24 pasando |
+| Tests de integración HTTP | 10/10 pasando |
+| Tests de integración Redis | 8/8 pasando |
+| Total de tests | 31/31 pasando |
 | Advertencias de compilación | 0 |
 
 ---
 
 ## Limitaciones conocidas
 
-- **Solo almacenamiento en memoria**: los datos de rate limiting se pierden al reiniciar el servidor. Para un entorno distribuido con múltiples instancias, se necesitaría reemplazar el almacenamiento por Redis u otro sistema compartido. La arquitectura ya está preparada para este cambio.
-- **Limpieza de memoria periódica**: el sistema elimina automáticamente los registros de clientes inactivos cada 5 minutos (configurable con `RateLimiting:CleanupIntervalSeconds`). En sistemas con muchos clientes únicos esto mantiene el consumo de memoria estable.
 - **Identificación solo por IP**: no hay soporte actual para identificar clientes por token de autenticación o usuario registrado.
+- **Limpieza de memoria (modo InMemory)**: el sistema elimina automáticamente los registros de clientes inactivos cada 5 minutos (configurable con `RateLimiting:CleanupIntervalSeconds`).
+- **Redis modo InMemory**: al reiniciar el servidor los baldes se resetean; con Redis los datos persisten entre reinicios.

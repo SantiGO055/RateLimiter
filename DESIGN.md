@@ -183,16 +183,51 @@ Son records inmutables. No hay lógica de negocio en ellos — su única respons
 
 ---
 
-## 6. Mejoras con más tiempo
+## 6. Integración Redis
+
+Redis está implementado como segunda opción de almacenamiento, activable por configuración (`"Store": "Redis"` en `appsettings.json`). Coexiste con InMemory; el modo activo se elige en el arranque vía DI condicional en `Program.cs`.
+
+### Decisión de diseño: algoritmo separado, no nuevo store
+
+El análisis inicial consideró implementar `IRateLimitStore` con Redis. Esa ruta fue descartada porque el contrato de la interfaz (`GetOrCreateAsync<T>` devuelve una referencia mutable que el algoritmo lockea) es fundamentalmente incompatible con Redis: no se pueden compartir referencias mutables entre procesos.
+
+La solución implementada es `RedisTokenBucketAlgorithm`, una implementación directa de `IRateLimitAlgorithm` que no usa `IRateLimitStore`. El algoritmo ejecuta un Lua script atómico en Redis que condensa en una sola operación: leer estado, calcular refill, consumir token, escribir resultado.
+
+```
+IRateLimitAlgorithm
+  ├── TokenBucketAlgorithm         → lock por objeto BucketState (in-process)
+  └── RedisTokenBucketAlgorithm    → Lua script atómico (cross-process)
+```
+
+### Por qué Lua script y no comandos GET/SET separados
+
+Con dos comandos separados (GET para leer, SET para escribir), dos instancias de la API pueden leer el mismo estado simultáneamente, calcular que tienen tokens disponibles, y ambas permitir el request — superando el límite. El Lua script elimina esta ventana porque Redis lo ejecuta como una transacción indivisible: ningún otro comando puede intercalarse.
+
+### Estado almacenado por cliente en Redis
+
+Cada cliente tiene un hash en Redis con dos campos:
+- `tokens`: fichas disponibles (número con decimales)
+- `ts`: timestamp Unix del último refill (segundos con precisión de milisegundos)
+
+El key tiene el formato `{clientIp}:{endpoint}` (igual que InMemory). La expiración se maneja con TTL nativo de Redis (`EXPIRE`), eliminando la necesidad del `CleanupService` en modo Redis.
+
+### Infraestructura local
+
+`docker-compose.yml` en la raíz del proyecto levanta Redis 7 Alpine en el puerto `6380`. Los tests de integración Redis usan Testcontainers, que levanta un contenedor Redis temporario automáticamente.
+
+## 7. Mejoras con más tiempo
+
+### Implementado
+- **Circuit breaker para Redis:** Polly abre el circuito después de N fallos en una ventana de tiempo y deja de golpear Redis por un período configurable. Cada transición (opened/closed/half-opened) se logea. Durante el circuito abierto el middleware opera en modo fail-open.
+- **Métricas con System.Diagnostics.Metrics:** Contadores de requests allowed/blocked/errors por endpoint, compatibles con OpenTelemetry y Prometheus exporters sin requerir paquetes adicionales.
+- **Logging estructurado:** Denied requests logean a nivel `Information` con key del cliente y retry-after. Allowed requests logean a `Debug` (silenciado por defecto en producción).
 
 ### Prioridad alta
-- **Redis como store distribuido:** Reemplazar `InMemoryRateLimitStore` por una implementación con `StackExchange.Redis`. La operación atómica de refill + consumo se haría con un Lua script para evitar round-trips. La interfaz `IRateLimitStore` ya está preparada para este swap.
 - **Sliding Window Counter como segundo algoritmo:** Para endpoints donde no se quieren bursts (ej: creación de cuentas), es más apropiado que Token Bucket. Registrar distintos algoritmos por regla.
 
 ### Prioridad media
-- **Métricas con Prometheus/OpenTelemetry:** Contadores de requests allowed/denied por endpoint, histograma de tokens restantes, alertas cuando un cliente está consistentemente throttled.
 - **Rate limit por múltiples dimensiones:** Componer reglas — ej: máx 100 req/min por IP AND máx 1000 req/min por endpoint globalmente.
-- **Circuit breaker en el middleware:** Si el store (Redis) falla, el sistema hace fail-open por X segundos en vez de rechazar todo el tráfico.
+- **Exportador Prometheus/OpenTelemetry:** Las métricas ya están emitidas con `System.Diagnostics.Metrics`; agregar un exporter permite scrapearlas con Prometheus sin cambiar la lógica.
 
 ### Prioridad baja
 - **Dashboard de rate limiting:** UI para ver qué clientes están siendo throttled y ajustar reglas en runtime.
@@ -201,7 +236,7 @@ Son records inmutables. No hay lógica de negocio en ellos — su única respons
 
 ---
 
-## 7. Uso de IA en el proceso
+## 8. Uso de IA en el proceso
 
 ### Qué hizo Claude Code
 
@@ -222,12 +257,12 @@ Son records inmutables. No hay lógica de negocio en ellos — su única respons
 
 ---
 
-## 8. Deuda técnica conocida
+## 9. Deuda técnica conocida
 
-### Race condition en limpieza del store (Low)
+### Race condition en limpieza del store InMemory (Low)
 
 `InMemoryRateLimitStore` tiene una race condition teórica entre `RemoveExpiredEntriesAsync` y `GetOrCreateAsync`. Si la limpieza elimina una entrada exactamente mientras un request la está leyendo, el `_lastAccess` puede quedar desincronizado de `_entries`, forzando un reset inesperado del bucket de ese cliente en la siguiente solicitud.
 
 **Por qué no se corrige ahora:** Requiere sincronizar ambos `ConcurrentDictionary` de forma atómica, lo que agrega un lock global que degrada el throughput. El impacto real es mínimo (ocurre solo si el cleanup de 5 minutos y un request del mismo cliente coinciden en milisegundos; el peor efecto es que ese cliente recupera el bucket lleno momentáneamente).
 
-**Resolución natural:** Cuando se implemente el store distribuido con Redis, la atomicidad de refill + consumo + expiración se resuelve con Lua scripts, eliminando este problema de raíz.
+**No aplica a Redis:** En modo Redis, la atomicidad de refill + consumo + expiración está resuelta por el Lua script y el TTL nativo. Este problema no existe en el modo distribuido.

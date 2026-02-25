@@ -16,6 +16,10 @@ public class InMemoryRateLimitStore : IRateLimitStore
 
     public Task<T> GetOrCreateAsync<T>(string key, Func<T> factory) where T : class
     {
+        // ConcurrentDictionary.GetOrAdd with a factory delegate is NOT atomic: under contention
+        // it may invoke the factory more than once. Wrapping in Lazy<T> ensures the factory
+        // runs exactly once — the dictionary may create multiple Lazy instances, but only one
+        // will win the race and its Value will be computed a single time.
         var lazy = _entries.GetOrAdd(key, _ => new Lazy<object>(() => factory()));
         _lastAccess[key] = DateTime.UtcNow;
         return Task.FromResult((T)lazy.Value);

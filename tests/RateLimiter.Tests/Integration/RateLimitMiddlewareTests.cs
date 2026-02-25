@@ -5,8 +5,11 @@ using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Time.Testing;
 using RateLimiter.Domain;
+using RateLimiter.Domain.Algorithms;
+using RateLimiter.Infrastructure.Storage;
 
 namespace RateLimiter.Tests.Integration;
 
@@ -21,6 +24,17 @@ public class RateLimitMiddlewareTests
             if (config is not null)
                 builder.ConfigureAppConfiguration((_, cfg) =>
                     cfg.AddInMemoryCollection(config));
+
+            // ConfigureAppConfiguration cannot reliably override Store in .NET minimal hosting,
+            // so we force InMemory via DI overrides instead. This guarantees each factory
+            // gets an isolated store regardless of what appsettings.json has configured.
+            builder.ConfigureTestServices(services =>
+            {
+                services.RemoveAll<IRateLimitAlgorithm>();
+                services.RemoveAll<IRateLimitStore>();
+                services.AddSingleton<IRateLimitStore, InMemoryRateLimitStore>();
+                services.AddSingleton<IRateLimitAlgorithm, TokenBucketAlgorithm>();
+            });
 
             if (configureServices is not null)
                 builder.ConfigureTestServices(configureServices);

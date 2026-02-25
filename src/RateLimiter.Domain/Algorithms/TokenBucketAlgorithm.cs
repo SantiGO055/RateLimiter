@@ -31,6 +31,9 @@ public class TokenBucketAlgorithm(IRateLimitStore store, TimeProvider timeProvid
             }
 
             var tokensNeeded = 1.0 - state.AvailableTokens;
+            // Math.Round before Math.Ceiling avoids an IEEE 754 artifact: dividing certain
+            // doubles produces results like 4.000000000000001, which Ceiling rounds up to 5.
+            // Rounding to 9 decimal places first eliminates that error without affecting precision.
             var retryAfter = refillRate > 0
                 ? (int?)Math.Ceiling(Math.Round(tokensNeeded / refillRate, 9))
                 : null;
