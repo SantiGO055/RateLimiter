@@ -25,9 +25,6 @@ public class RateLimitMiddlewareTests
                 builder.ConfigureAppConfiguration((_, cfg) =>
                     cfg.AddInMemoryCollection(config));
 
-            // ConfigureAppConfiguration cannot reliably override Store in .NET minimal hosting,
-            // so we force InMemory via DI overrides instead. This guarantees each factory
-            // gets an isolated store regardless of what appsettings.json has configured.
             builder.ConfigureTestServices(services =>
             {
                 services.RemoveAll<IRateLimitAlgorithm>();
