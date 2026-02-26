@@ -215,24 +215,49 @@ El key tiene el formato `{clientIp}:{endpoint}` (igual que InMemory). La expirac
 
 `docker-compose.yml` en la raíz del proyecto levanta Redis 7 Alpine en el puerto `6380`. Los tests de integración Redis usan Testcontainers, que levanta un contenedor Redis temporario automáticamente.
 
-## 7. Mejoras con más tiempo
+### Defensa ante caídas: circuit breaker
 
-### Implementado
-- **Circuit breaker para Redis:** Polly abre el circuito después de N fallos en una ventana de tiempo y deja de golpear Redis por un período configurable. Cada transición (opened/closed/half-opened) se logea. Durante el circuito abierto el middleware opera en modo fail-open.
-- **Métricas con System.Diagnostics.Metrics:** Contadores de requests allowed/blocked/errors por endpoint, compatibles con OpenTelemetry y Prometheus exporters sin requerir paquetes adicionales.
-- **Logging estructurado:** Denied requests logean a nivel `Information` con key del cliente y retry-after. Allowed requests logean a `Debug` (silenciado por defecto en producción).
+Sin circuit breaker, si Redis cae cada request sigue intentando conectarse y falla con timeout — multiplicando la latencia de la API por todos los usuarios simultáneamente. Con **Polly**, después de N fallos consecutivos en una ventana de tiempo el circuito abre: los requests siguientes pasan directamente (fail-open) sin tocar Redis. Tras un período configurable, el circuito va a half-open y deja pasar un request de prueba para verificar si Redis se recuperó.
+
+Las tres transiciones se logean: `Opened` en `Warning`, `Closed` en `Information`, `HalfOpened` en `Debug`.
+
+Configuración en `appsettings.json`:
+```json
+"CircuitBreaker": {
+  "FailureThreshold": 5,
+  "SamplingDurationSeconds": 30,
+  "BreakDurationSeconds": 15
+}
+```
+
+> Implementación: `Program.cs` — `ResiliencePipelineBuilder` en la rama Redis.
+
+### Observabilidad
+
+**Logging estructurado:** el middleware logea cada request bloqueado en `Information` (con key del cliente y retry-after) y cada request permitido en `Debug` (silenciado por defecto en producción). Fallos del store se logean en `Warning` con la excepción.
+
+**Métricas:** tres contadores con `System.Diagnostics.Metrics` (sin dependencias extra), tagueados por endpoint:
+- `ratelimit.requests.allowed`
+- `ratelimit.requests.blocked`
+- `ratelimit.store.errors`
+
+Compatibles con OpenTelemetry y cualquier exporter de Prometheus sin cambiar la lógica de negocio.
+
+> Implementación: `src/RateLimiter.Api/Metrics/RateLimitMetrics.cs` + `RateLimitMiddleware.cs`.
+
+## 7. Mejoras futuras
 
 ### Prioridad alta
-- **Sliding Window Counter como segundo algoritmo:** Para endpoints donde no se quieren bursts (ej: creación de cuentas), es más apropiado que Token Bucket. Registrar distintos algoritmos por regla.
+- **Sliding Window Counter como segundo algoritmo:** Para endpoints donde no se quieren bursts (ej: creación de cuentas), es más apropiado que Token Bucket. La interfaz `IRateLimitAlgorithm` ya permite registrar distintas implementaciones por regla.
 
 ### Prioridad media
 - **Rate limit por múltiples dimensiones:** Componer reglas — ej: máx 100 req/min por IP AND máx 1000 req/min por endpoint globalmente.
-- **Exportador Prometheus/OpenTelemetry:** Las métricas ya están emitidas con `System.Diagnostics.Metrics`; agregar un exporter permite scrapearlas con Prometheus sin cambiar la lógica.
+- **Exportador Prometheus/OpenTelemetry:** Las métricas ya están emitidas con `System.Diagnostics.Metrics`; agregar un exporter permite scrapearlas con Prometheus sin modificar la lógica.
 
 ### Prioridad baja
-- **Dashboard de rate limiting:** UI para ver qué clientes están siendo throttled y ajustar reglas en runtime.
-- **Dynamic rule loading:** Cambiar reglas sin redeploy (via Redis pub/sub o polling a una config store).
-- **Response caching:** Si un request es rechazado, cachear la respuesta 429 por `RetryAfter` segundos para ni siquiera evaluar el algoritmo.
+- **Rate limit por usuario autenticado:** Usar token JWT o user ID como identificador en vez de IP para mayor granularidad.
+- **Dynamic rule loading:** Cambiar reglas sin redeploy via Redis pub/sub o polling a un config store.
+- **Response caching:** Si un request es rechazado, cachear la respuesta 429 por `RetryAfter` segundos para evitar evaluar el algoritmo en cada intento.
 
 ---
 
